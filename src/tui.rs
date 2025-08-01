@@ -25,17 +25,20 @@ pub type Item<'repo> = (LogEntryInfo, Option<&'repo gix::Submodule<'repo>>);
 struct App<'repo> {
     git_dir: PathBuf,
     items: Vec<Item<'repo>>,
+    list_items: List<'static>,
     state: ListState,
     list_height: u16,
 }
 
 impl<'repo> App<'repo> {
     fn new(git_dir: PathBuf, items: Vec<Item<'repo>>) -> App<'repo> {
+        let list_items = build_list_items(&items);
         App {
             git_dir,
             items,
             state: ListState::default(),
             list_height: 0,
+            list_items,
         }
     }
 
@@ -99,6 +102,52 @@ impl<'repo> App<'repo> {
     pub fn go_to_end(&mut self) {
         self.state.select(Some(self.items.len() - 1));
     }
+}
+
+fn build_list_items<'repo>(items: &[Item<'repo>]) -> List<'static> {
+    let mut list_items: Vec<ListItem> = Vec::with_capacity(items.len());
+    let mut prev_submodule: Option<&gix::Submodule> = None;
+    for i in items {
+        let message_lines = i.0.message.split(|c| *c == b'\n').collect::<Vec<_>>();
+        let first_line = String::from_utf8_lossy(message_lines[0]).into_owned();
+        let author_str = i.0.author.to_str_lossy();
+        let author = if author_str.len() > 20 {
+            format!("{author_str:.19}…")
+        } else {
+            format!("{author_str:<20}")
+        };
+
+        // Only show submodule if it changed from the previous entry
+        let submodule_display = if prev_submodule.map(|s| s.name()) != i.1.map(|s| s.name()) {
+            format!("{:^20}", i.1.map(|s| s.name()).unwrap_or_default())
+        } else {
+            format!("{:^20}", "")
+        };
+        prev_submodule = i.1;
+
+        let lines = vec![Line::from(vec![
+            // time
+            Span::styled(i.0.time.clone(), Style::new().blue()),
+            Span::raw(" "),
+            // author
+            Span::styled(author, Style::default().green()),
+            Span::raw(" "),
+            // submodule
+            Span::styled(submodule_display, Style::default().gray()),
+            Span::raw(" "),
+            // message
+            Span::styled(first_line, Style::default()),
+        ])];
+        list_items.push(ListItem::new(lines).style(Style::default()));
+    }
+
+    List::new(list_items)
+        .highlight_style(
+            Style::default()
+                .bg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ")
 }
 
 pub fn run<'repo>(git_dir: PathBuf, log_entries: Vec<Item<'repo>>) -> Result<()> {
@@ -187,51 +236,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .split(f.area());
     app.list_height = chunks[0].height.saturating_sub(2);
 
-    let mut items: Vec<ListItem> = Vec::with_capacity(app.items.len());
-    let mut prev_submodule: Option<&gix::Submodule> = None;
-    for i in &app.items {
-        let message_lines = i.0.message.split(|c| *c == b'\n').collect::<Vec<_>>();
-        let first_line = String::from_utf8_lossy(message_lines[0]);
-        let author_str = i.0.author.to_str_lossy();
-        let author = if author_str.len() > 20 {
-            format!("{author_str:.19}…")
-        } else {
-            format!("{author_str:<20}")
-        };
-
-        // Only show submodule if it changed from the previous entry
-        let submodule_display = if prev_submodule.map(|s| s.name()) != i.1.map(|s| s.name()) {
-            format!("{:^20}", i.1.map(|s| s.name()).unwrap_or_default())
-        } else {
-            format!("{:^20}", "")
-        };
-        prev_submodule = i.1;
-
-        let lines = vec![Line::from(vec![
-            // time
-            Span::styled(&i.0.time, Style::new().blue()),
-            Span::raw(" "),
-            // author
-            Span::styled(author, Style::default().green()),
-            Span::raw(" "),
-            // submodule
-            Span::styled(submodule_display, Style::default().gray()),
-            Span::raw(" "),
-            // message
-            Span::styled(first_line, Style::default()),
-        ])];
-        items.push(ListItem::new(lines).style(Style::default()));
-    }
-
-    let items = List::new(items)
-        .highlight_style(
-            Style::default()
-                .bg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
-
-    f.render_stateful_widget(items, chunks[0], &mut app.state);
+    f.render_stateful_widget(&app.list_items, chunks[0], &mut app.state);
 
     let status_layout = Layout::default()
         .direction(Direction::Horizontal)
